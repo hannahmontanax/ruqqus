@@ -87,9 +87,11 @@ class Board(Base, Stndrd, Age_times):
     @property
     def mods(self):
 
-        z = [x.user for x in self.moderators if x.accepted]
+        z = [x for x in self.moderators if x.accepted]
 
         z = sorted(z, key=lambda x: x.id)
+
+        z = [x.user for x in z]
 
         return z
 
@@ -551,3 +553,9 @@ class Board(Base, Stndrd, Age_times):
         return mod.__dict__[f"perm_{perm}"]
 
 
+    @property
+    def siege_rep_requirement(self):
+
+        now=int(time.time())
+
+        return self.stored_subscriber_count//10 + min(180, (now-self.created_utc)//(60*60*24))

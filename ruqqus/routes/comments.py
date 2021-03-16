@@ -48,7 +48,7 @@ def comment_cid_api_redirect(c_id=None, p_id=None):
 
 @app.route("/api/v1/comment/<c_id>", methods=["GET"])
 @app.route("/+<boardname>/post/<p_id>/<anything>/<c_id>", methods=["GET"])
-@app.route("/test/coment/<c_id>")
+@app.route("/api/vue/comment/<c_id>")
 @auth_desired
 @api("read")
 def post_pid_comment_cid(c_id, p_id=None, boardname=None, anything=None, v=None):
@@ -140,7 +140,7 @@ def post_pid_comment_cid(c_id, p_id=None, boardname=None, anything=None, v=None)
     exile=g.db.query(ModAction
         ).filter_by(
         kind="exile_user"
-        ).subquery()
+        ).distinct(ModAction.target_comment_id).subquery()
 
     for i in range(6 - context):
         if v:
@@ -296,6 +296,9 @@ def api_comment(v):
     #process and sanitize
     body = request.form.get("body", "")[0:10000]
     body = body.lstrip().rstrip()
+
+    if not body:
+        return jsonify({"error":"You need to actually write something!"}), 400
     
     body=preprocess(body)
     with CustomRenderer(post_id=parent_id) as renderer:

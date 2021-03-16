@@ -47,6 +47,8 @@ def searchlisting(q, v=None, page=1, t="None", sort="top", b=None):
                 Submission.submission_aux,
             ).join(
                 Submission.author
+            ).join(
+                Submission.board
             )
 
     if 'q' in criteria:
@@ -68,19 +70,14 @@ def searchlisting(q, v=None, page=1, t="None", sort="top", b=None):
     if b:
         posts=posts.filter(Submission.board_id==b.id)
     elif 'guild' in criteria:
+        board=get_guild(criteria["guild"])
         posts=posts.filter(
-                Submission.board.id==get_guild(criteria['guild']).id
+                Submission.board_id==board.id,
             )
 
     if 'url' in criteria:
         posts=posts.filter(
             SubmissionAux.url.ilike("%"+criteria['url']+"%")
-            )
-
-
-    posts=posts.options(
-            contains_eager(Submission.submission_aux),
-            contains_eager(Submission.author)
             )
 
 
@@ -122,10 +119,14 @@ def searchlisting(q, v=None, page=1, t="None", sort="top", b=None):
 
         posts = posts.filter(
             Submission.author_id.notin_(blocking),
-            Submission.author_id.notin_(blocked)
+            Submission.author_id.notin_(blocked),
+            Board.is_banned==False,
         )
     else:
-        posts = posts.filter(Submission.post_public == True)
+        posts = posts.filter(
+            Submission.post_public == True,
+            Board.is_banned==False,
+            )
 
     if t:
         now = int(time.time())
@@ -140,6 +141,12 @@ def searchlisting(q, v=None, page=1, t="None", sort="top", b=None):
         else:
             cutoff = 0
         posts = posts.filter(Submission.created_utc >= cutoff)
+
+    posts=posts.options(
+        contains_eager(Submission.submission_aux),
+        contains_eager(Submission.author),
+        contains_eager(Submission.board)
+        )
 
     if sort == "hot":
         posts = posts.order_by(Submission.score_hot.desc())
@@ -158,6 +165,7 @@ def searchlisting(q, v=None, page=1, t="None", sort="top", b=None):
 
 @app.route("/search", methods=["GET"])
 @app.route("/api/v1/search", methods=["GET"])
+@app.route("/api/vue/search")
 @auth_desired
 @api("read")
 def search(v, search_type="posts"):
@@ -184,7 +192,29 @@ def search(v, search_type="posts"):
         if not (v and v.admin_level >= 3):
             boards = boards.filter_by(is_banned=False)
 
-        boards = boards.order_by(Board.name.ilike(term).desc(), Board.stored_subscriber_count.desc())
+        if v:
+            joined = g.db.query(Subscription).filter_by(user_id=v.id, is_active=True).subquery()
+
+            boards=boards.join(
+                joined,
+                joined.c.board_id==Board.id,
+                isouter=True
+                )
+
+            boards=boards.order_by(
+                Board.name.ilike(term).desc(),
+                joined.c.id.is_(None).asc(),
+                Board.stored_subscriber_count.desc(),
+                )
+
+
+
+        else:
+
+            boards = boards.order_by(
+                Board.name.ilike(term).desc(), 
+                Board.stored_subscriber_count.desc()
+                )
 
         total = boards.count()
 
@@ -201,7 +231,7 @@ def search(v, search_type="posts"):
                                sort_method=sort,
                                next_exists=next_exists
                                ),
-                "api":lambda:jsonfy({"data":[x.json for x in boards]})
+                "api":lambda:jsonify({"data":[x.json for x in boards]})
                 }
 
     elif query.startswith("@"):
@@ -289,6 +319,9 @@ def search_guild(name, v, search_type="posts"):
     b = get_guild(name, graceful=True)
     if not b:
         abort(404)
+
+    if b.is_banned:
+        return render_template("board_banned.html", v=v, b=b)
 
     page=max(1, int(request.args.get("page", 1)))
 

@@ -2,7 +2,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask import *
 import time
 from sqlalchemy import *
-from sqlalchemy.orm import relationship, deferred, joinedload, lazyload, contains_eager
+from sqlalchemy.orm import relationship, deferred, joinedload, lazyload, contains_eager, aliased
 from os import environ
 from secrets import token_hex
 import random
@@ -568,17 +568,56 @@ class User(Base, Stndrd, Age_times):
                 )
             ).subquery()
 
-        alts = g.db.query(User).join(
-            subq, 
+        data = g.db.query(
+            User,
+            aliased(Alt, alias=subq)
+            ).join(
+            subq,
             or_(
-                subq.c.user1 == User.id,
-                subq.c.user2 == User.id
-                ),
+                subq.c.user1==User.id,
+                subq.c.user2==User.id
+                )
             ).filter(
             User.id != self.id
             ).order_by(User.username.asc()).all()
 
-        return [x for x in alts]
+        data=[x for x in data]
+        output=[]
+        for x in data:
+            user=x[0]
+            user._is_manual=x[1].is_manual
+            output.append(user)
+
+        return output
+
+    def alts_threaded(self, db):
+
+        subq = db.query(Alt).filter(
+            or_(
+                Alt.user1==self.id,
+                Alt.user2==self.id
+                )
+            ).subquery()
+
+        data = db.query(
+            User,
+            aliased(Alt, alias=subq)
+            ).join(
+            subq,
+            or_(
+                subq.c.user1==User.id,
+                subq.c.user2==User.id
+                )
+            ).filter(
+            User.id != self.id
+            ).order_by(User.username.asc()).all()
+
+        data=[x for x in data]
+        output=[]
+        for x in data:
+            user=x[0]
+            user._is_manual=x[1].is_manual
+            output.append(user)
 
         return output
 
@@ -614,13 +653,19 @@ class User(Base, Stndrd, Age_times):
 
         aws.delete_file(name=f"users/{self.username}/profile-{self.profile_nonce}.png")
         self.has_profile = False
-        g.db.add(self)
+        try:
+            g.db.add(self)
+        except:
+            pass
 
     def del_banner(self):
 
         aws.delete_file(name=f"users/{self.username}/banner-{self.banner_nonce}.png")
         self.has_banner = False
-        g.db.add(self)
+        try:
+            g.db.add(self)
+        except:
+            pass
 
     @property
     def banner_url(self):
@@ -669,7 +714,7 @@ class User(Base, Stndrd, Age_times):
         now = int(time.time())
 
         return now - max(self.last_siege_utc,
-                         self.created_utc) > 60 * 60 * 24 * 30
+                         self.created_utc) > 60 * 60 * 24 * 7
 
     @property
     def can_submit_image(self):
@@ -789,7 +834,10 @@ class User(Base, Stndrd, Age_times):
         if reason:
             self.ban_reason = reason
 
-        g.db.add(self)
+        try:
+            g.db.add(self)
+        except:
+            pass
 
 
     def unban(self):
@@ -836,7 +884,10 @@ class User(Base, Stndrd, Age_times):
                 if bad_badge:
                     g.db.delete(bad_badge)
 
-        g.db.add(self)
+        try:
+            g.db.add(self)
+        except:
+            pass
 
     @property
     def applications(self):
@@ -896,23 +947,36 @@ class User(Base, Stndrd, Age_times):
 
 
 
-    def guild_rep(self, guild):
+    def guild_rep(self, guild, recent=0):
 
-        posts=db.query(Submission.score_top).filter_by(
+        
+
+        posts=g.db.query(Submission.score_top).filter_by(
             is_banned=False,
-            board_id=guild.id).all()
+            original_board_id=guild.id)
+
+        if recent:
+            cutoff=int(time.time())-60*60*24*recent
+            posts=posts.filter(Submission.created_utc>cutoff)
+
+        posts=posts.all()
 
         post_rep= sum([x[0] for x in posts])
 
 
-        comments=db.query(Comment.score_top).join(
-            Comment.post).filter(
-            Comment.is_banned==False,
-            Submission.board_id==guild.id).all()
+        comments=g.db.query(Comment.score_top).filter_by(
+            is_banned=False,
+            original_board_id=guild.id)
+
+        if recent:
+            cutoff=int(time.time())-60*60*24*recent
+            comments=comments.filter(Comment.created_utc>cutoff)
+
+        comments=comments.all()
 
         comment_rep=sum([x[0] for x in comments])
 
-        return post_rep + comment_rep
+        return int(post_rep + comment_rep)
 
     @property
     def has_premium(self):

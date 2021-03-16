@@ -12,6 +12,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_compress import Compress
 from time import sleep
+from collections import deque
 
 from flaskext.markdown import Markdown
 from sqlalchemy.ext.declarative import declarative_base
@@ -22,19 +23,21 @@ from sqlalchemy.pool import QueuePool
 import threading
 import requests
 import random
+import redis
+import gevent
 
 from redis import BlockingConnectionPool
 
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 
-_version = "2.29.9.9"
+_version = "2.32.1"
 
 app = Flask(__name__,
             template_folder='./templates',
             static_folder='./static'
             )
-app.wsgi_app = ProxyFix(app.wsgi_app, num_proxies=2)
+app.wsgi_app = ProxyFix(app.wsgi_app, num_proxies=3)
 app.url_map.strict_slashes = False
 
 app.config["SITE_NAME"]=environ.get("SITE_NAME", "ruqqus").lstrip().rstrip()
@@ -68,7 +71,7 @@ app.config["DISABLE_SIGNUPS"]=int(environ.get("DISABLE_SIGNUPS",0))
 
 app.jinja_env.cache = {}
 
-app.config["UserAgent"] = f"Ruqqus title finder tool for Ruqqus v{_version} developed by Ruqqus LLC for ruqqus.com."
+app.config["UserAgent"] = f"Content Aquisition for Porpl message board v{_version}."
 
 if "localhost" in app.config["SERVER_NAME"]:
     app.config["CACHE_TYPE"] = "null"
@@ -119,10 +122,12 @@ Compress(app)
 
 
 # app.config["CACHE_REDIS_URL"]
-app.config["RATELIMIT_STORAGE_URL"] = 'memory://'
+app.config["RATELIMIT_STORAGE_URL"] = environ.get("REDIS_URL").lstrip().rstrip() if environ.get("REDIS_URL") else 'memory://'
 app.config["RATELIMIT_KEY_PREFIX"] = "flask_limiting_"
-app.config["RATELIMIT_ENABLED"] = bool(
-    int(environ.get("RATELIMIT_ENABLED", True)))
+app.config["RATELIMIT_ENABLED"] = True
+app.config["RATELIMIT_DEFAULTS_DEDUCT_WHEN"]=lambda:True
+app.config["RATELIMIT_DEFAULTS_EXEMPT_WHEN"]=lambda:False
+app.config["RATELIMIT_HEADERS_ENABLED"]=True
 
 
 def limiter_key_func():
@@ -200,10 +205,11 @@ db_session = scoped_session(sessionmaker(class_=RoutingSession, query_cls=Retryi
 
 Base = declarative_base()
 
-# import and bind all routing functions
-import ruqqus.classes
-from ruqqus.routes import *
-import ruqqus.helpers.jinja2
+
+#set the shared redis cache for misc stuff
+
+r=redis.Redis(host=app.config["CACHE_REDIS_URL"][8:], decode_responses=True, ssl_cert_reqs=None)
+
 
 
 @app.before_first_request
@@ -215,14 +221,21 @@ def app_setup():
 IP_BAN_CACHE_TTL = int(environ.get("IP_BAN_CACHE_TTL", 3600))
 UA_BAN_CACHE_TTL = int(environ.get("UA_BAN_CACHE_TTL", 3600))
 
+local_ban_cache={}
 
-@cache.memoize(IP_BAN_CACHE_TTL)
+
+#@cache.memoize(IP_BAN_CACHE_TTL)
 def is_ip_banned(remote_addr):
     """
     Given a remote address, returns whether or not user is banned
     """
-    return bool(g.db.query(ruqqus.classes.IP).filter_by(
-        addr=remote_addr).count())
+
+    return bool(r.get(f"ban_ip_{remote_addr}"))
+
+# import and bind all routing functions
+import ruqqus.classes
+from ruqqus.routes import *
+import ruqqus.helpers.jinja2
 
 
 @cache.memoize(UA_BAN_CACHE_TTL)
@@ -245,12 +258,23 @@ def get_useragent_ban_response(user_agent_str):
 @app.before_request
 def before_request():
 
+    g.timestamp = int(time.time())
+
+    if is_ip_banned(request.remote_addr):
+        try:
+            print("banned ip", request.remote_addr, session.get("user_id"), session.get("history"))
+        except:
+            pass
+
+        #offensively hold request open for 60s while ignoring user and doing other,
+        #more useful things
+        #gevent.sleep(60)
+        return "", 429
+        #gevent.getcurrent().kill()
+
     g.db = db_session()
 
     session.permanent = True
-
-    if is_ip_banned(request.remote_addr):
-        return "", 403
 
     ua_banned, response_tuple = get_useragent_ban_response(
         request.headers.get("User-Agent", "NoAgent"))
@@ -264,8 +288,6 @@ def before_request():
 
     if not session.get("session_id"):
         session["session_id"] = secrets.token_hex(16)
-
-    g.timestamp = int(time.time())
 
     ua=request.headers.get("User-Agent","")
     if "CriOS/" in ua:
@@ -329,15 +351,26 @@ def after_request(response):
                              "deny")
 
     # signups - hit discord webhook
-    if request.method == "POST" and response.status_code in [
-            301, 302] and request.path == "/signup":
-        link = f'https://{app.config["SERVER_NAME"]}/@{request.form.get("username")}'
-        thread = threading.Thread(
-            target=lambda: log_event(
-                name="Account Signup", link=link))
-        thread.start()
+    # if request.method == "POST" and response.status_code in [
+    #         301, 302] and request.path == "/signup":
+    #     link = f'https://{app.config["SERVER_NAME"]}/@{request.form.get("username")}'
+    #     thread = threading.Thread(
+    #         target=lambda: log_event(
+    #             name="Account Signup", link=link))
+    #     thread.start()
 
-    g.db.close()
+    try:
+        g.db.close()
+    except AttributeError:
+        pass
+
+    # req_stop = time.time()
+
+    # try:
+    #     req_time=req_stop - g.timestamp
+    #     site_performance(req_time)
+    # except AttributeError:
+    #     pass
 
     return response
 
@@ -351,3 +384,5 @@ def www_redirect(path):
 # def teardown(resp):
 
 #     g.db.close()
+
+

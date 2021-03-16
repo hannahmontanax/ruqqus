@@ -24,7 +24,7 @@ from ruqqus.helpers.alerts import send_notification
 from ruqqus.classes import *
 from .front import frontlist
 from flask import *
-from ruqqus.__main__ import app, limiter, cache
+from ruqqus.__main__ import app, limiter, cache, db_session
 
 BAN_REASONS = ['',
                "URL shorteners are not permitted.",
@@ -180,8 +180,8 @@ def edit_post(pid, v):
     return redirect(p.permalink)
 
 
-@app.route("/api/submit/title", methods=['GET'])
-@limiter.limit("3/minute")
+@app.route("/submit/title", methods=['GET'])
+#@limiter.limit("3/minute")
 @is_not_banned
 @no_negative_balance("html")
 #@tos_agreed
@@ -192,7 +192,8 @@ def get_post_title(v):
     if not url:
         return abort(400)
 
-    headers = {"User-Agent": app.config["UserAgent"]}
+    #mimic chrome browser agent
+    headers = {"User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.72 Safari/537.36"}
     try:
         x = requests.get(url, headers=headers)
     except BaseException:
@@ -217,6 +218,7 @@ def get_post_title(v):
 
 @app.route("/submit", methods=['POST'])
 @app.route("/api/v1/submit", methods=["POST"])
+@app.route("/api/vue/submit", methods=["POST"])
 #@limiter.limit("6/minute")
 @is_not_banned
 @no_negative_balance('html')
@@ -423,18 +425,17 @@ def submit_post(v):
         ).join(
             Submission.submission_aux
         ).filter(
-
-            or_(
-                and_(
+            #or_(
+            #    and_(
                     Submission.author_id == v.id,
                     SubmissionAux.title.op('<->')(title) < app.config["SPAM_SIMILARITY_THRESHOLD"],
                     Submission.created_utc > cutoff
-                ),
-                and_(
-                    SubmissionAux.title.op('<->')(title) < app.config["SPAM_SIMILARITY_THRESHOLD"]/2,
-                    Submission.created_utc > cutoff
-                )
-            )
+            #    ),
+            #    and_(
+            #        SubmissionAux.title.op('<->')(title) < app.config["SPAM_SIMILARITY_THRESHOLD"]/2,
+            #        Submission.created_utc > cutoff
+            #    )
+            #)
     ).all()
 
     if url:
@@ -443,17 +444,17 @@ def submit_post(v):
         ).join(
             Submission.submission_aux
         ).filter(
-            or_(
-                and_(
+            #or_(
+            #    and_(
                     Submission.author_id == v.id,
                     SubmissionAux.url.op('<->')(url) < app.config["SPAM_URL_SIMILARITY_THRESHOLD"],
                     Submission.created_utc > cutoff
-                ),
-                and_(
-                    SubmissionAux.url.op('<->')(url) < app.config["SPAM_URL_SIMILARITY_THRESHOLD"]/2,
-                    Submission.created_utc > cutoff
-                )
-            )
+            #    ),
+            #    and_(
+            #        SubmissionAux.url.op('<->')(url) < app.config["SPAM_URL_SIMILARITY_THRESHOLD"]/2,
+            #        Submission.created_utc > cutoff
+            #    )
+            #)
         ).all()
     else:
         similar_urls = []
@@ -687,7 +688,7 @@ def submit_post(v):
                                                              "body", ""),
                                                          b=board
                                                          ), 400),
-                        "api": lambda: ({"error": f"The link `{badlink.link}` is not allowed. Reason: {badlink.reason}"}, 400)
+                        "api": lambda: ({"error": f"Image files only"}, 400)
                         }
 
         name = f'post/{new_post.base36id}/{secrets.token_urlsafe(8)}'
@@ -703,25 +704,25 @@ def submit_post(v):
         g.db.add(new_post)
 
         #csam detection
-        def del_function():
+        def del_function(db):
             delete_file(name)
             new_post.is_banned=True
-            g.db.add(new_post)
-            g.db.commit()
+            db.add(new_post)
+            db.commit()
             ma=ModAction(
                 kind="ban_post",
                 user_id=1,
-                note="csam detected",
+                note="banned image",
                 target_submission_id=new_post.id
                 )
-            g.db.add(ma)
-            g.db.commit()
+            db.add(ma)
+            db.commit()
 
             
         csam_thread=threading.Thread(target=check_csam_url, 
                                      args=(f"https://{BUCKET}/{name}", 
                                            v, 
-                                           del_function
+                                           lambda:del_function(db=db_session())
                                           )
                                     )
         csam_thread.start()
@@ -737,7 +738,7 @@ def submit_post(v):
 
 
     # expire the relevant caches: front page new, board new
-    #cache.delete_memoized(frontlist, sort="new")
+    cache.delete_memoized(frontlist)
     g.db.commit()
     cache.delete_memoized(Board.idlist, board, sort="new")
 
